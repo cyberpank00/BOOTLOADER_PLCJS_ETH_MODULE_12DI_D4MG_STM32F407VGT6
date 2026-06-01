@@ -135,20 +135,20 @@ def connect(ip: str = TARGET_IP, port: int = TARGET_PORT) -> ModbusTcpClient:
     return c
 
 def read_input_regs(c: ModbusTcpClient) -> list:
-    rr = c.read_input_registers(0, IR_COUNT, slave=UNIT_ID)
+    rr = c.read_input_registers(0, count=IR_COUNT, device_id=UNIT_ID)
     if rr.isError():
         print(f"ERROR reading input registers: {rr}")
         sys.exit(1)
     return rr.registers
 
 def write_cmd(c: ModbusTcpClient, cmd: int):
-    rr = c.write_register(HR_CMD, cmd, slave=UNIT_ID)
+    rr = c.write_register(HR_CMD, cmd, device_id=UNIT_ID)
     if rr.isError():
         print(f"ERROR writing command {cmd}: {rr}")
         sys.exit(1)
 
 def write_regs(c: ModbusTcpClient, addr: int, values: list):
-    rr = c.write_registers(addr, values, slave=UNIT_ID)
+    rr = c.write_registers(addr, values, device_id=UNIT_ID)
     if rr.isError():
         print(f"ERROR writing registers at 0x{addr:04X}: {rr}")
         sys.exit(1)
