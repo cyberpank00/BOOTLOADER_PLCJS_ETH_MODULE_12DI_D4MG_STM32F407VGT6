@@ -1,13 +1,13 @@
 /**
  * @file  led_indication.c
- * @brief STAT_LED (PC6) patterns for bootloader states.
+ * @brief STAT_LED (PC8) patterns for bootloader states.
  */
 
 #include "led_indication.h"
 #include "stm32f4xx_hal.h"
 
 #define LED_PORT    GPIOC
-#define LED_PIN     GPIO_PIN_6
+#define LED_PIN     GPIO_PIN_8
 
 static led_pattern_t s_pattern = LED_PATTERN_OFF;
 static uint32_t      s_last_toggle;

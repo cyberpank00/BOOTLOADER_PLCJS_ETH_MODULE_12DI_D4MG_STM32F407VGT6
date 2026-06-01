@@ -16,7 +16,7 @@ void MX_GPIO_Init(void)
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_GPIOD_CLK_ENABLE();
 
-    /* ETHRST (PD11) — output, start low */
+    /* ETHRST (PD11) — output, assert reset low first */
     HAL_GPIO_WritePin(ETHRST_GPIO_Port, ETHRST_Pin, GPIO_PIN_RESET);
     gi.Pin   = ETHRST_Pin;
     gi.Mode  = GPIO_MODE_OUTPUT_PP;
@@ -24,7 +24,14 @@ void MX_GPIO_Init(void)
     gi.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(ETHRST_GPIO_Port, &gi);
 
-    /* STAT_LED (PC6) — output */
+    /* KSZ8863 hardware reset sequence:
+     *   RESET# held LOW >= 10 ms  (already asserted above)
+     *   then HIGH to release, wait >= 100 ms for internal init before MDIO. */
+    HAL_Delay(10);
+    HAL_GPIO_WritePin(ETHRST_GPIO_Port, ETHRST_Pin, GPIO_PIN_SET);
+    HAL_Delay(100);
+
+    /* STAT_LED (PC8) — output */
     HAL_GPIO_WritePin(STAT_LED_GPIO_Port, STAT_LED_Pin, GPIO_PIN_RESET);
     gi.Pin   = STAT_LED_Pin;
     gi.Mode  = GPIO_MODE_OUTPUT_PP;
@@ -32,7 +39,7 @@ void MX_GPIO_Init(void)
     gi.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(STAT_LED_GPIO_Port, &gi);
 
-    /* FACT_RES / service button (PC8) — input with pull-up */
+    /* FACT_RES / service button (PC6) — input with pull-up */
     gi.Pin  = FACT_RES_Pin;
     gi.Mode = GPIO_MODE_INPUT;
     gi.Pull = GPIO_PULLUP;

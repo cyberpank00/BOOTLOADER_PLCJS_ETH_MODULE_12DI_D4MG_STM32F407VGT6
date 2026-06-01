@@ -29,6 +29,25 @@ static ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]
 static user_phy_Object_t   phyObj;
 static volatile uint8_t    s_frame_received;
 
+/* ---- Rx slot tracking (maps DMA buffer pointer back to its pbuf) --------
+ *
+ * HAL ETH v2 splits Rx into two callbacks:
+ *   RxAllocateCallback -- called by HAL to get a buffer for the DMA to fill.
+ *                         We allocate a pbuf and return its payload pointer.
+ *   RxLinkCallback     -- called after DMA fills the buffer; we must build a
+ *                         pbuf chain from the raw buffer pointer + length.
+ *
+ * Because the HAL only passes the raw buffer pointer (not the pbuf*) to
+ * RxLinkCallback, we keep a small lookup table of (pbuf*, buffer*) pairs so
+ * we can recover the pbuf* from the buffer* without any fragile arithmetic.
+ *
+ * The pbuf is owned by the table until RxLinkCallback claims it, then it is
+ * owned by the netif input path, which calls pbuf_free() after processing.
+ * This ensures zero leaks from the pbuf pool.
+ */
+typedef struct { struct pbuf *p; uint8_t *buff; } rx_slot_t;
+static rx_slot_t s_rx_slots[ETH_RX_DESC_CNT];
+
 /* ---- PHY I/O wrappers -------------------------------------------------- */
 static int32_t phy_io_init(void)    { return 0; }
 static int32_t phy_io_deinit(void)  { return 0; }
@@ -55,12 +74,20 @@ static int32_t phy_io_tick(void)
 /* ---- HAL ETH Rx/Tx callbacks ------------------------------------------- */
 void HAL_ETH_RxAllocateCallback(uint8_t **buff)
 {
-    struct pbuf *p = pbuf_alloc(PBUF_RAW, ETH_RX_BUF_SIZE, PBUF_POOL);
-    if (p != NULL) {
-        *buff = p->payload;
-    } else {
-        *buff = NULL;
+    for (uint32_t i = 0; i < ETH_RX_DESC_CNT; i++) {
+        if (s_rx_slots[i].p == NULL) {
+            struct pbuf *p = pbuf_alloc(PBUF_RAW, ETH_RX_BUF_SIZE, PBUF_POOL);
+            if (p != NULL) {
+                s_rx_slots[i].p    = p;
+                s_rx_slots[i].buff = (uint8_t *)p->payload;
+                *buff = (uint8_t *)p->payload;
+            } else {
+                *buff = NULL;
+            }
+            return;
+        }
     }
+    *buff = NULL; /* all slots busy */
 }
 
 void HAL_ETH_RxLinkCallback(void **pStart, void **pEnd,
@@ -68,33 +95,32 @@ void HAL_ETH_RxLinkCallback(void **pStart, void **pEnd,
 {
     struct pbuf **ppStart = (struct pbuf **)pStart;
     struct pbuf **ppEnd   = (struct pbuf **)pEnd;
+    struct pbuf *p = NULL;
 
-    /* Find the pbuf that owns this buffer by backing up from buff. */
-    struct pbuf *p = (struct pbuf *)((uint8_t *)buff - offsetof(struct pbuf, payload));
-    /* Actually, pbuf_alloc with PBUF_POOL puts payload right after the struct,
-       but the canonical way with the new HAL is to use custom pbufs.
-       For simplicity in bare-metal we use PBUF_RAM and set len properly. */
+    /* Recover the pbuf that owns this DMA buffer */
+    for (uint32_t i = 0; i < ETH_RX_DESC_CNT; i++) {
+        if (s_rx_slots[i].buff == buff) {
+            p = s_rx_slots[i].p;
+            s_rx_slots[i].p    = NULL;
+            s_rx_slots[i].buff = NULL;
+            break;
+        }
+    }
+    if (p == NULL) return;
 
-    /* With PBUF_POOL, payload is at a known offset. The simplest approach
-       is to create a fresh ref pbuf pointing to this buffer. */
-    struct pbuf *q = pbuf_alloc(PBUF_RAW, Length, PBUF_RAM);
-    if (q == NULL) return;
-    memcpy(q->payload, buff, Length);
+    p->len     = Length;
+    p->tot_len = Length;
+    p->next    = NULL;
 
-    q->next    = NULL;
-    q->tot_len = 0;
-    q->len     = Length;
-
-    if (!*ppStart) {
-        *ppStart = q;
+    if (*ppStart == NULL) {
+        *ppStart = p;
     } else {
-        (*ppEnd)->next = q;
+        /* Append to chain, update tot_len of all preceding pbufs */
+        for (struct pbuf *q = *ppStart; q != NULL; q = q->next)
+            q->tot_len += Length;
+        (*ppEnd)->next = p;
     }
-    *ppEnd = q;
-
-    for (struct pbuf *r = *ppStart; r != NULL; r = r->next) {
-        r->tot_len += Length;
-    }
+    *ppEnd = p;
 }
 
 void HAL_ETH_TxFreeCallback(uint32_t *buff)
@@ -111,7 +137,7 @@ void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef *handlerEth)
 /* ---- Low-level init ----------------------------------------------------- */
 static void low_level_init(struct netif *netif)
 {
-    uint8_t mac[6] = { 0x00, 0x80, 0xE1, 0x00, 0x00, 0x01 };
+    uint8_t mac[6] = { 0x02, 0x01, 0x02, 0x03, 0x04, 0x05 };
 
     heth.Instance            = ETH;
     heth.Init.MACAddr        = mac;

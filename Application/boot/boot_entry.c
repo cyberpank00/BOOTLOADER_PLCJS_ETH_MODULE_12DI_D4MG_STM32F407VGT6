@@ -8,9 +8,9 @@
 #include "app_validate.h"
 #include "stm32f4xx_hal.h"
 
-/* FACT_RES button: PC8, active-low with internal pull-up. */
+/* FACT_RES button: PC6, active-low with internal pull-up. */
 #define SERVICE_BTN_PORT    GPIOC
-#define SERVICE_BTN_PIN     GPIO_PIN_8
+#define SERVICE_BTN_PIN     GPIO_PIN_6
 
 bool boot_entry_button_pressed(void)
 {

@@ -26,7 +26,10 @@ extern "C" {
 #define MEMP_NUM_TCP_SEG        16
 #define MEMP_NUM_SYS_TIMEOUT    8
 #define PBUF_POOL_SIZE          16
-#define PBUF_POOL_BUFSIZE       1524
+/* Must be >= ETH_RX_BUF_SIZE (1536) so each pool entry can hold one full
+   DMA buffer without overflow. Previously was 1524, causing a 12-byte
+   buffer overrun on every received frame.                               */
+#define PBUF_POOL_BUFSIZE       1536
 
 /* ---- TCP settings ------------------------------------------------------- */
 #define LWIP_TCP                1
