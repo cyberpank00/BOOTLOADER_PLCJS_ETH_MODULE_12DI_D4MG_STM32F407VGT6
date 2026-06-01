@@ -71,7 +71,7 @@ static int32_t phy_io_tick(void)
     return (int32_t)HAL_GetTick();
 }
 
-/* ---- HAL ETH Rx/Tx callbacks ------------------------------------------- */
+/* ---- HAL ETH Rx callbacks ---------------------------------------------- */
 void HAL_ETH_RxAllocateCallback(uint8_t **buff)
 {
     for (uint32_t i = 0; i < ETH_RX_DESC_CNT; i++) {
@@ -123,9 +123,13 @@ void HAL_ETH_RxLinkCallback(void **pStart, void **pEnd,
     *ppEnd = p;
 }
 
+/* ---- HAL ETH Tx callback ----------------------------------------------- */
 void HAL_ETH_TxFreeCallback(uint32_t *buff)
 {
-    pbuf_free((struct pbuf *)buff);
+    /* pData was set to NULL in low_level_output — nothing to free here.
+     * Pbuf lifetime is managed by the LwIP stack in main-loop context,
+     * avoiding pool corruption from IRQ-context pbuf_free calls. */
+    (void)buff;
 }
 
 void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef *handlerEth)
@@ -174,34 +178,42 @@ static void low_level_init(struct netif *netif)
 }
 
 /* ---- Transmit ----------------------------------------------------------- */
+
+/* Static TX buffer: the pbuf chain is copied here before handing off to the
+ * DMA.  This decouples pbuf lifetime from the DMA transfer entirely:
+ *   - No pbuf_ref() needed — the caller (LwIP) frees the pbuf normally.
+ *   - TxFreeCallback becomes a no-op (pData = NULL).
+ *   - No pbuf_free() from IRQ context → no pool corruption under
+ *     SYS_LIGHTWEIGHT_PROT = 0.
+ * Cost: one memcpy per TX frame + ETH_MAX_PACKET_SIZE (1528 B) of RAM. */
+static uint8_t s_tx_buf[ETH_MAX_PACKET_SIZE];
+
 static err_t low_level_output(struct netif *netif, struct pbuf *p)
 {
     (void)netif;
 
-    uint32_t          idx = 0;
-    ETH_BufferTypeDef bufs[ETH_TX_DESC_CNT];
-    memset(bufs, 0, sizeof(bufs));
-
+    /* Flatten the pbuf chain into the static DMA buffer */
+    uint16_t total = 0;
     for (struct pbuf *q = p; q != NULL; q = q->next) {
-        if (idx >= ETH_TX_DESC_CNT) return ERR_BUF;
-        bufs[idx].buffer = q->payload;
-        bufs[idx].len    = q->len;
-        if (idx > 0) bufs[idx - 1].next = &bufs[idx];
-        idx++;
+        if ((uint32_t)total + q->len > sizeof(s_tx_buf))
+            return ERR_BUF;
+        memcpy(s_tx_buf + total, q->payload, q->len);
+        total += q->len;
     }
 
-    TxConfig.Length   = p->tot_len;
-    TxConfig.TxBuffer = bufs;
-    TxConfig.pData    = p;
+    ETH_BufferTypeDef buf = { .buffer = s_tx_buf, .len = total, .next = NULL };
 
-    pbuf_ref(p);
+    TxConfig.Length   = total;
+    TxConfig.TxBuffer = &buf;
+    TxConfig.pData    = NULL;   /* TxFreeCallback is a no-op */
 
-    HAL_StatusTypeDef s = HAL_ETH_Transmit_IT(&heth, &TxConfig);
-    if (s != HAL_OK) {
-        pbuf_free(p);
-        return ERR_IF;
+    /* Wait for any previous TX to finish (typically < 100 us) */
+    uint32_t t = HAL_GetTick();
+    while (HAL_ETH_GetState(&heth) != HAL_ETH_STATE_STARTED) {
+        if (HAL_GetTick() - t > 50u) return ERR_IF;
     }
-    return ERR_OK;
+
+    return (HAL_ETH_Transmit_IT(&heth, &TxConfig) == HAL_OK) ? ERR_OK : ERR_IF;
 }
 
 /* ---- Receive ------------------------------------------------------------ */
