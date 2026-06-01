@@ -90,8 +90,8 @@ CMD_STATUS_ERROR = 3
 BOOT_STATE_NAMES = {
     0: "BOOT_START",
     1: "BOOT_CHECK_ENTRY",
-    2: "BOOT_PREPARE_UPDATE",
-    3: "BOOT_WAIT_COMMAND",
+    2: "BOOT_WAIT_COMMAND",
+    3: "BOOT_PREPARE_UPDATE",
     4: "BOOT_RECEIVE_FW",
     5: "BOOT_VERIFY_STAGING",
     6: "BOOT_INSTALL_FW",
@@ -101,16 +101,18 @@ BOOT_STATE_NAMES = {
 }
 
 ERROR_NAMES = {
-    0: "NONE",
-    1: "FLASH_ERASE",
-    2: "FLASH_WRITE",
-    3: "IMAGE_CRC",
-    4: "IMAGE_TOO_LARGE",
-    5: "BAD_PARAMS",
-    6: "BLOCK_INDEX",
-    7: "APP_VALIDATE",
-    8: "PRODUCT_MISMATCH",
-    9: "HW_REV_MISMATCH",
+    0:  "NONE",
+    1:  "PRODUCT_MISMATCH",
+    2:  "HW_REV_MISMATCH",
+    3:  "IMAGE_TOO_LARGE",
+    4:  "BLOCK_CRC",
+    5:  "IMAGE_CRC",
+    6:  "FLASH_ERASE",
+    7:  "FLASH_WRITE",
+    8:  "APP_VALIDATE",
+    9:  "UPDATE_TIMEOUT",
+    10: "BLOCK_INDEX",
+    11: "BAD_PARAMS",
 }
 
 CMD_STATUS_NAMES = {0: "IDLE", 1: "BUSY", 2: "OK", 3: "ERROR"}
@@ -274,7 +276,7 @@ def cmd_update(args):
         print(f"ERROR: unexpected magic 0x{magic:08X} — is bootloader running?")
         sys.exit(1)
     state = regs[IR_BOOT_STATE]
-    if state not in (3, 4, 5, 9):   # WAIT_COMMAND, RECEIVE_FW, VERIFY_STAGING, ERROR
+    if state not in (2, 4, 5, 9):   # WAIT_COMMAND=2, RECEIVE_FW=4, VERIFY_STAGING=5, ERROR=9
         print(f"ERROR: unexpected boot state {BOOT_STATE_NAMES.get(state, str(state))}")
         sys.exit(1)
 
