@@ -22,6 +22,25 @@ static inline void u32_to_regs(uint32_t v, uint16_t *r)
     r[1] = (uint16_t)(v & 0xFFFFu);
 }
 
+/* Extract firmware bytes from Modbus uint16_t register array.
+ *
+ * Modbus TCP sends register values big-endian over the wire (high byte first).
+ * nanoMODBUS stores them as native uint16_t (value = (hi << 8) | lo).
+ * On little-endian STM32 the in-memory layout is [lo, hi] per register.
+ * A direct (uint8_t *) cast would therefore deliver bytes in swapped pairs.
+ *
+ * This helper reverses the process: reg[i] high-byte → dest[2i],
+ *                                   reg[i] low-byte  → dest[2i+1].
+ * This matches the byte order seen by the Modbus master.
+ */
+static void regs_to_bytes(const uint16_t *regs, uint8_t *dest, uint16_t len)
+{
+    for (uint16_t i = 0; i < len; i++) {
+        uint16_t reg = regs[i / 2u];
+        dest[i] = (uint8_t)((i & 1u) ? (reg & 0xFFu) : (reg >> 8u));
+    }
+}
+
 /* ---- Module state ------------------------------------------------------- */
 static metadata_t *s_meta;
 static uint16_t    s_cmd_status;
@@ -132,10 +151,14 @@ static void exec_write_block(void)
         return;
     }
 
-    /* Data starts at s_block_buf[3] (byte offset 6 within the buffer). */
-    const uint8_t *data = (const uint8_t *)&s_block_buf[3];
+    /* Extract firmware bytes from Modbus register buffer.
+     * Registers are stored as big-endian uint16_t by nanoMODBUS;
+     * on little-endian STM32 a raw cast would swap bytes in each pair.
+     * regs_to_bytes() restores the original byte order sent by the master. */
+    uint8_t data_bytes[FW_MAX_BLOCK_SIZE];
+    regs_to_bytes(&s_block_buf[3], data_bytes, data_len);
 
-    if (!flash_if_write(STAGING_FLASH_BASE + offset, data, data_len)) {
+    if (!flash_if_write(STAGING_FLASH_BASE + offset, data_bytes, data_len)) {
         s_meta->last_error = BOOT_ERR_FLASH_WRITE;
         s_cmd_status = CMD_STATUS_ERROR;
         return;
@@ -271,7 +294,9 @@ nmbs_error fw_proto_write_holding_regs(uint16_t addr, uint16_t qty,
         }
         memcpy(&s_block_buf[off], in, qty * sizeof(uint16_t));
 
-        /* Trigger WRITE_BLOCK when we write starting from 0x0100. */
+        /* Trigger WRITE_BLOCK when we write starting from 0x0100.
+         * Master must send block_idx (2 regs) + data_len (1 reg) +
+         * at least 1 data reg in the same FC16 transaction. */
         if (addr == 0x0100u && qty >= 4u) {
             exec_write_block();
         }
