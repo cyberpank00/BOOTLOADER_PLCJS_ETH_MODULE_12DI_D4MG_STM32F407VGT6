@@ -1,0 +1,304 @@
+/**
+ * @file  fw_update_proto.c
+ * @brief Firmware update protocol — Modbus register handlers.
+ */
+
+#include "fw_update_proto.h"
+#include "flash_map.h"
+#include "flash_if.h"
+#include "crc32.h"
+#include "boot_state.h"
+#include <string.h>
+
+/* ---- Private helpers ---------------------------------------------------- */
+static inline uint32_t regs_to_u32(const uint16_t *r)
+{
+    return ((uint32_t)r[0] << 16) | (uint32_t)r[1];
+}
+
+static inline void u32_to_regs(uint32_t v, uint16_t *r)
+{
+    r[0] = (uint16_t)(v >> 16);
+    r[1] = (uint16_t)(v & 0xFFFFu);
+}
+
+/* ---- Module state ------------------------------------------------------- */
+static metadata_t *s_meta;
+static uint16_t    s_cmd_status;
+static uint16_t    s_params[32];        /* HR 0x0000 – 0x001F */
+static uint16_t    s_block_buf[128];    /* HR 0x0100 – 0x017F */
+static bool        s_reboot_req;
+static bool        s_install_req;
+
+void fw_proto_init(metadata_t *meta)
+{
+    s_meta       = meta;
+    s_cmd_status = CMD_STATUS_IDLE;
+    s_reboot_req = false;
+    s_install_req = false;
+    memset(s_params, 0, sizeof(s_params));
+    memset(s_block_buf, 0, sizeof(s_block_buf));
+}
+
+/* ---- Command execution -------------------------------------------------- */
+static void exec_begin_update(void)
+{
+    uint32_t image_size  = regs_to_u32(&s_params[0x10]);
+    uint32_t image_crc   = regs_to_u32(&s_params[0x12]);
+    uint32_t fw_ver      = regs_to_u32(&s_params[0x14]);
+    uint32_t product_id  = regs_to_u32(&s_params[0x16]);
+    uint16_t hw_rev      = s_params[0x18];
+    uint16_t block_size  = s_params[0x19];
+    uint32_t block_count = regs_to_u32(&s_params[0x1A]);
+
+    if (product_id != PRODUCT_ID_DEFAULT) {
+        s_meta->last_error = BOOT_ERR_PRODUCT_MISMATCH;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+    if (hw_rev != HW_REVISION_DEFAULT) {
+        s_meta->last_error = BOOT_ERR_HW_REV_MISMATCH;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+    if (image_size == 0u || image_size > STAGING_FLASH_SIZE) {
+        s_meta->last_error = BOOT_ERR_IMAGE_TOO_LARGE;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+    if (block_size == 0u || block_size > FW_MAX_BLOCK_SIZE) {
+        s_meta->last_error = BOOT_ERR_BAD_PARAMS;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+    if (block_count == 0u || block_count > META_MAX_BLOCKS) {
+        s_meta->last_error = BOOT_ERR_BAD_PARAMS;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+
+    /* Erase staging area */
+    uint32_t nsectors = STAGING_LAST_SECTOR - STAGING_FIRST_SECTOR + 1u;
+    if (!flash_if_erase_sectors(STAGING_FIRST_SECTOR, nsectors)) {
+        s_meta->last_error = BOOT_ERR_FLASH_ERASE;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+
+    s_meta->image_size          = image_size;
+    s_meta->image_crc32         = image_crc;
+    s_meta->fw_version          = fw_ver;
+    s_meta->product_id          = product_id;
+    s_meta->hw_revision         = hw_rev;
+    s_meta->block_size          = block_size;
+    s_meta->block_count         = block_count;
+    s_meta->received_block_count = 0u;
+    s_meta->staging_valid        = 0u;
+    s_meta->install_requested    = 0u;
+    s_meta->boot_state           = (uint32_t)BOOT_RECEIVE_FW;
+    s_meta->last_error           = (uint32_t)BOOT_ERR_NONE;
+    memset(s_meta->block_bitmap, 0, sizeof(s_meta->block_bitmap));
+    metadata_save(s_meta);
+
+    s_cmd_status = CMD_STATUS_OK;
+}
+
+static void exec_write_block(void)
+{
+    if (s_meta->boot_state != (uint32_t)BOOT_RECEIVE_FW) {
+        s_meta->last_error = BOOT_ERR_BAD_PARAMS;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+
+    uint32_t block_idx = regs_to_u32(&s_block_buf[0]);
+    uint16_t data_len  = s_block_buf[2];
+
+    if (block_idx >= s_meta->block_count) {
+        s_meta->last_error = BOOT_ERR_BLOCK_INDEX;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+    if (data_len == 0u || data_len > FW_MAX_BLOCK_SIZE) {
+        s_meta->last_error = BOOT_ERR_BAD_PARAMS;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+
+    uint32_t offset = block_idx * (uint32_t)s_meta->block_size;
+    if (offset + data_len > STAGING_FLASH_SIZE) {
+        s_meta->last_error = BOOT_ERR_IMAGE_TOO_LARGE;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+
+    /* Data starts at s_block_buf[3] (byte offset 6 within the buffer). */
+    const uint8_t *data = (const uint8_t *)&s_block_buf[3];
+
+    if (!flash_if_write(STAGING_FLASH_BASE + offset, data, data_len)) {
+        s_meta->last_error = BOOT_ERR_FLASH_WRITE;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+
+    if (!metadata_bitmap_get(s_meta, block_idx)) {
+        metadata_bitmap_set(s_meta, block_idx);
+        s_meta->received_block_count++;
+    }
+
+    s_cmd_status = CMD_STATUS_OK;
+}
+
+static void exec_finalize(void)
+{
+    if (!metadata_all_blocks_received(s_meta)) {
+        s_meta->last_error = BOOT_ERR_BAD_PARAMS;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+
+    uint32_t crc = crc32_calc((const uint8_t *)STAGING_FLASH_BASE,
+                               s_meta->image_size);
+    if (crc != s_meta->image_crc32) {
+        s_meta->last_error = BOOT_ERR_IMAGE_CRC;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+
+    s_meta->staging_valid     = 1u;
+    s_meta->install_requested = 1u;
+    s_meta->boot_state        = (uint32_t)BOOT_VERIFY_STAGING;
+    s_meta->last_error        = (uint32_t)BOOT_ERR_NONE;
+    metadata_save(s_meta);
+
+    s_cmd_status = CMD_STATUS_OK;
+}
+
+static void exec_install(void)
+{
+    if (!s_meta->staging_valid || !s_meta->install_requested) {
+        s_meta->last_error = BOOT_ERR_BAD_PARAMS;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+    s_install_req = true;
+    s_cmd_status  = CMD_STATUS_BUSY;
+}
+
+static void exec_abort(void)
+{
+    s_meta->boot_state           = (uint32_t)BOOT_WAIT_COMMAND;
+    s_meta->install_requested    = 0u;
+    s_meta->staging_valid        = 0u;
+    s_meta->received_block_count = 0u;
+    s_meta->last_error           = (uint32_t)BOOT_ERR_NONE;
+    memset(s_meta->block_bitmap, 0, sizeof(s_meta->block_bitmap));
+    metadata_save(s_meta);
+
+    s_cmd_status = CMD_STATUS_OK;
+}
+
+/* ---- Protocol poll ------------------------------------------------------ */
+void fw_proto_poll(metadata_t *meta)
+{
+    s_meta = meta;
+    /* No periodic work — commands are processed in write callback. */
+}
+
+bool fw_proto_reboot_requested(void)  { return s_reboot_req; }
+bool fw_proto_install_requested(void) { return s_install_req; }
+
+void fw_proto_install_done(void)
+{
+    s_install_req = false;
+    s_cmd_status  = CMD_STATUS_OK;
+}
+
+void fw_proto_install_error(void)
+{
+    s_install_req = false;
+    s_cmd_status  = CMD_STATUS_ERROR;
+}
+
+/* ---- Modbus register callbacks ------------------------------------------ */
+nmbs_error fw_proto_read_input_regs(uint16_t addr, uint16_t qty,
+                                    uint16_t *out)
+{
+    uint16_t ir[0x20];
+    memset(ir, 0, sizeof(ir));
+
+    u32_to_regs(BOOT_MODBUS_MAGIC,         &ir[0x00]);
+    u32_to_regs(BOOTLOADER_VERSION,         &ir[0x02]);
+    ir[0x04] = (uint16_t)s_meta->boot_state;
+    ir[0x05] = s_meta->app_valid;
+    u32_to_regs(s_meta->app_fw_version,     &ir[0x06]);
+    u32_to_regs(s_meta->product_id ? s_meta->product_id : PRODUCT_ID_DEFAULT,
+                &ir[0x08]);
+    ir[0x0A] = s_meta->hw_revision ? s_meta->hw_revision : HW_REVISION_DEFAULT;
+    ir[0x0B] = (uint16_t)s_meta->last_error;
+    u32_to_regs(s_meta->block_count,        &ir[0x0C]);
+    u32_to_regs(s_meta->received_block_count, &ir[0x0E]);
+    u32_to_regs(s_meta->image_size,         &ir[0x10]);
+    u32_to_regs(s_meta->image_crc32,        &ir[0x12]);
+    ir[0x14] = s_cmd_status;
+    ir[0x15] = s_meta->staging_valid;
+
+    if (addr + qty > 0x20u) {
+        return NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS;
+    }
+    memcpy(out, &ir[addr], qty * sizeof(uint16_t));
+    return NMBS_ERROR_NONE;
+}
+
+nmbs_error fw_proto_read_holding_regs(uint16_t addr, uint16_t qty,
+                                      uint16_t *out)
+{
+    if (addr < 0x20u && addr + qty <= 0x20u) {
+        memcpy(out, &s_params[addr], qty * sizeof(uint16_t));
+        return NMBS_ERROR_NONE;
+    }
+    return NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS;
+}
+
+nmbs_error fw_proto_write_holding_regs(uint16_t addr, uint16_t qty,
+                                       const uint16_t *in)
+{
+    /* Block data region (0x0100+) */
+    if (addr >= 0x0100u) {
+        uint16_t off = addr - 0x0100u;
+        if (off + qty > 128u) {
+            return NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS;
+        }
+        memcpy(&s_block_buf[off], in, qty * sizeof(uint16_t));
+
+        /* Trigger WRITE_BLOCK when we write starting from 0x0100. */
+        if (addr == 0x0100u && qty >= 4u) {
+            exec_write_block();
+        }
+        return NMBS_ERROR_NONE;
+    }
+
+    /* Parameter region (0x0000 – 0x001F) */
+    if (addr + qty > 0x20u) {
+        return NMBS_EXCEPTION_ILLEGAL_DATA_ADDRESS;
+    }
+    memcpy(&s_params[addr], in, qty * sizeof(uint16_t));
+
+    /* Command register written? */
+    if (addr == 0x0000u) {
+        uint16_t cmd = s_params[0];
+        s_params[0]  = CMD_NONE;
+
+        switch (cmd) {
+        case CMD_BEGIN_UPDATE:   exec_begin_update();  break;
+        case CMD_FINALIZE_UPDATE: exec_finalize();     break;
+        case CMD_INSTALL_UPDATE:  exec_install();      break;
+        case CMD_ABORT_UPDATE:    exec_abort();        break;
+        case CMD_REBOOT:          s_reboot_req = true; break;
+        default:
+            return NMBS_EXCEPTION_ILLEGAL_DATA_VALUE;
+        }
+    }
+
+    return NMBS_ERROR_NONE;
+}
