@@ -8,19 +8,25 @@
 #include "app_validate.h"
 #include "stm32f4xx_hal.h"
 
-/* FACT_RES button: PC8, active-low with internal pull-up. */
-#define SERVICE_BTN_PORT    GPIOC
-#define SERVICE_BTN_PIN     GPIO_PIN_8
-
-bool boot_entry_button_pressed(void)
+bool boot_entry_software_request(void)
 {
-    return HAL_GPIO_ReadPin(SERVICE_BTN_PORT, SERVICE_BTN_PIN) == GPIO_PIN_RESET;
+    /* The application requests bootloader mode by writing BOOT_REQUEST_MAGIC
+     * into a no-init RAM cell and resetting. Consume it (one-shot) so a later
+     * power cycle boots the application normally. */
+    volatile uint32_t *flag = (volatile uint32_t *)BOOT_REQUEST_FLAG_ADDR;
+    if (*flag == BOOT_REQUEST_MAGIC) {
+        *flag = 0u;
+        return true;
+    }
+    return false;
 }
 
 bool boot_entry_should_stay(const metadata_t *meta)
 {
-    /* 1. Service button held at startup */
-    if (boot_entry_button_pressed()) {
+    /* 1. Software request from the application (magic in no-init RAM). The
+     *    physical button is no longer used to enter the bootloader — in the
+     *    application PC6 is dedicated to factory reset. */
+    if (boot_entry_software_request()) {
         return true;
     }
 

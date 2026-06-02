@@ -1,21 +1,24 @@
 /*
  * Linker script for STM32F407VGT6 bootloader.
  *
- * Flash layout:
- *   Sectors 0-3  (64 KB)  — Bootloader code
- *   Sector  4    (64 KB)  — Metadata
- *   Sectors 5-7  (384 KB) — Application
- *   Sectors 8-10 (384 KB) — Staging
- *   Sector  11   (128 KB) — App Settings
+ * Flash layout (1 MB total):
+ *   Sectors 0-4  (0x08000000, 128 KB) -- Bootloader code  <-- this script
+ *   Sector  5    (0x08020000, 128 KB) -- Metadata
+ *   Sectors 6-7  (0x08040000, 256 KB) -- Application
+ *   Sectors 8-9  (0x08080000, 256 KB) -- Staging
+ *   Sector  10   (0x080C0000, 128 KB) -- App Settings
+ *   Sector  11   (0x080E0000, 128 KB) -- Reserved
  *
- * The bootloader occupies the first 64 KB of Flash.
+ * The bootloader occupies the first 128 KB of Flash (sectors 0-4).
  */
 
 ENTRY(Reset_Handler)
 
 MEMORY
 {
-  RAM    (xrw) : ORIGIN = 0x20000000, LENGTH = 128K
+  /* Top 16 bytes reserved for the no-init boot-request flag shared with the
+   * application (0x2001FFF0). Must match the application linker script. */
+  RAM    (xrw) : ORIGIN = 0x20000000, LENGTH = 0x1FFF0
   CCMRAM (xrw) : ORIGIN = 0x10000000, LENGTH = 64K
   FLASH  (rx)  : ORIGIN = 0x08000000, LENGTH = 128K
 }

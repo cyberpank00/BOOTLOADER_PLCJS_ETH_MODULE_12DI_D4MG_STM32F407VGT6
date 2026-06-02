@@ -72,4 +72,14 @@
 /* Maximum firmware block size for Modbus transfer (bytes). */
 #define FW_MAX_BLOCK_SIZE       240u
 
+/* ---- Software bootloader-entry request ---------------------------------- *
+ * The application sets this magic word in a no-init RAM cell (reserved at the
+ * top of SRAM in the linker script) and then issues a system reset. The
+ * bootloader checks the cell early in its entry decision and, if the magic is
+ * present, stays in the bootloader (and clears the cell so it is one-shot).
+ * The RAM cell survives a warm reset (NVIC_SystemReset) but not a power cycle.
+ * The address must match the reservation in BOTH linker scripts. */
+#define BOOT_REQUEST_FLAG_ADDR  0x2001FFF0u
+#define BOOT_REQUEST_MAGIC      0xB007CAFEu
+
 #endif /* FLASH_MAP_H */

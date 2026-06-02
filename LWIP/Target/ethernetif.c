@@ -29,6 +29,25 @@ static ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]
 static user_phy_Object_t   phyObj;
 static volatile uint8_t    s_frame_received;
 
+/* ---- Rx slot tracking (maps DMA buffer pointer back to its pbuf) --------
+ *
+ * HAL ETH v2 splits Rx into two callbacks:
+ *   RxAllocateCallback -- called by HAL to get a buffer for the DMA to fill.
+ *                         We allocate a pbuf and return its payload pointer.
+ *   RxLinkCallback     -- called after DMA fills the buffer; we must build a
+ *                         pbuf chain from the raw buffer pointer + length.
+ *
+ * Because the HAL only passes the raw buffer pointer (not the pbuf*) to
+ * RxLinkCallback, we keep a small lookup table of (pbuf*, buffer*) pairs so
+ * we can recover the pbuf* from the buffer* without any fragile arithmetic.
+ *
+ * The pbuf is owned by the table until RxLinkCallback claims it, then it is
+ * owned by the netif input path, which calls pbuf_free() after processing.
+ * This ensures zero leaks from the pbuf pool.
+ */
+typedef struct { struct pbuf *p; uint8_t *buff; } rx_slot_t;
+static rx_slot_t s_rx_slots[ETH_RX_DESC_CNT];
+
 /* ---- PHY I/O wrappers -------------------------------------------------- */
 static int32_t phy_io_init(void)    { return 0; }
 static int32_t phy_io_deinit(void)  { return 0; }
@@ -52,15 +71,23 @@ static int32_t phy_io_tick(void)
     return (int32_t)HAL_GetTick();
 }
 
-/* ---- HAL ETH Rx/Tx callbacks ------------------------------------------- */
+/* ---- HAL ETH Rx callbacks ---------------------------------------------- */
 void HAL_ETH_RxAllocateCallback(uint8_t **buff)
 {
-    struct pbuf *p = pbuf_alloc(PBUF_RAW, ETH_RX_BUF_SIZE, PBUF_POOL);
-    if (p != NULL) {
-        *buff = p->payload;
-    } else {
-        *buff = NULL;
+    for (uint32_t i = 0; i < ETH_RX_DESC_CNT; i++) {
+        if (s_rx_slots[i].p == NULL) {
+            struct pbuf *p = pbuf_alloc(PBUF_RAW, ETH_RX_BUF_SIZE, PBUF_POOL);
+            if (p != NULL) {
+                s_rx_slots[i].p    = p;
+                s_rx_slots[i].buff = (uint8_t *)p->payload;
+                *buff = (uint8_t *)p->payload;
+            } else {
+                *buff = NULL;
+            }
+            return;
+        }
     }
+    *buff = NULL; /* all slots busy */
 }
 
 void HAL_ETH_RxLinkCallback(void **pStart, void **pEnd,
@@ -68,38 +95,41 @@ void HAL_ETH_RxLinkCallback(void **pStart, void **pEnd,
 {
     struct pbuf **ppStart = (struct pbuf **)pStart;
     struct pbuf **ppEnd   = (struct pbuf **)pEnd;
+    struct pbuf *p = NULL;
 
-    /* Find the pbuf that owns this buffer by backing up from buff. */
-    struct pbuf *p = (struct pbuf *)((uint8_t *)buff - offsetof(struct pbuf, payload));
-    /* Actually, pbuf_alloc with PBUF_POOL puts payload right after the struct,
-       but the canonical way with the new HAL is to use custom pbufs.
-       For simplicity in bare-metal we use PBUF_RAM and set len properly. */
+    /* Recover the pbuf that owns this DMA buffer */
+    for (uint32_t i = 0; i < ETH_RX_DESC_CNT; i++) {
+        if (s_rx_slots[i].buff == buff) {
+            p = s_rx_slots[i].p;
+            s_rx_slots[i].p    = NULL;
+            s_rx_slots[i].buff = NULL;
+            break;
+        }
+    }
+    if (p == NULL) return;
 
-    /* With PBUF_POOL, payload is at a known offset. The simplest approach
-       is to create a fresh ref pbuf pointing to this buffer. */
-    struct pbuf *q = pbuf_alloc(PBUF_RAW, Length, PBUF_RAM);
-    if (q == NULL) return;
-    memcpy(q->payload, buff, Length);
+    p->len     = Length;
+    p->tot_len = Length;
+    p->next    = NULL;
 
-    q->next    = NULL;
-    q->tot_len = 0;
-    q->len     = Length;
-
-    if (!*ppStart) {
-        *ppStart = q;
+    if (*ppStart == NULL) {
+        *ppStart = p;
     } else {
-        (*ppEnd)->next = q;
+        /* Append to chain, update tot_len of all preceding pbufs */
+        for (struct pbuf *q = *ppStart; q != NULL; q = q->next)
+            q->tot_len += Length;
+        (*ppEnd)->next = p;
     }
-    *ppEnd = q;
-
-    for (struct pbuf *r = *ppStart; r != NULL; r = r->next) {
-        r->tot_len += Length;
-    }
+    *ppEnd = p;
 }
 
+/* ---- HAL ETH Tx callback ----------------------------------------------- */
 void HAL_ETH_TxFreeCallback(uint32_t *buff)
 {
-    pbuf_free((struct pbuf *)buff);
+    /* pData was set to NULL in low_level_output — nothing to free here.
+     * Pbuf lifetime is managed by the LwIP stack in main-loop context,
+     * avoiding pool corruption from IRQ-context pbuf_free calls. */
+    (void)buff;
 }
 
 void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef *handlerEth)
@@ -111,7 +141,7 @@ void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef *handlerEth)
 /* ---- Low-level init ----------------------------------------------------- */
 static void low_level_init(struct netif *netif)
 {
-    uint8_t mac[6] = { 0x00, 0x80, 0xE1, 0x00, 0x00, 0x01 };
+    uint8_t mac[6] = { 0x02, 0x01, 0x02, 0x03, 0x04, 0x05 };
 
     heth.Instance            = ETH;
     heth.Init.MACAddr        = mac;
@@ -148,34 +178,42 @@ static void low_level_init(struct netif *netif)
 }
 
 /* ---- Transmit ----------------------------------------------------------- */
+
+/* Static TX buffer: the pbuf chain is copied here before handing off to the
+ * DMA.  This decouples pbuf lifetime from the DMA transfer entirely:
+ *   - No pbuf_ref() needed — the caller (LwIP) frees the pbuf normally.
+ *   - TxFreeCallback becomes a no-op (pData = NULL).
+ *   - No pbuf_free() from IRQ context → no pool corruption under
+ *     SYS_LIGHTWEIGHT_PROT = 0.
+ * Cost: one memcpy per TX frame + ETH_MAX_PACKET_SIZE (1528 B) of RAM. */
+static uint8_t s_tx_buf[ETH_MAX_PACKET_SIZE];
+
 static err_t low_level_output(struct netif *netif, struct pbuf *p)
 {
     (void)netif;
 
-    uint32_t          idx = 0;
-    ETH_BufferTypeDef bufs[ETH_TX_DESC_CNT];
-    memset(bufs, 0, sizeof(bufs));
-
+    /* Flatten the pbuf chain into the static DMA buffer */
+    uint16_t total = 0;
     for (struct pbuf *q = p; q != NULL; q = q->next) {
-        if (idx >= ETH_TX_DESC_CNT) return ERR_BUF;
-        bufs[idx].buffer = q->payload;
-        bufs[idx].len    = q->len;
-        if (idx > 0) bufs[idx - 1].next = &bufs[idx];
-        idx++;
+        if ((uint32_t)total + q->len > sizeof(s_tx_buf))
+            return ERR_BUF;
+        memcpy(s_tx_buf + total, q->payload, q->len);
+        total += q->len;
     }
 
-    TxConfig.Length   = p->tot_len;
-    TxConfig.TxBuffer = bufs;
-    TxConfig.pData    = p;
+    ETH_BufferTypeDef buf = { .buffer = s_tx_buf, .len = total, .next = NULL };
 
-    pbuf_ref(p);
+    TxConfig.Length   = total;
+    TxConfig.TxBuffer = &buf;
+    TxConfig.pData    = NULL;   /* TxFreeCallback is a no-op */
 
-    HAL_StatusTypeDef s = HAL_ETH_Transmit_IT(&heth, &TxConfig);
-    if (s != HAL_OK) {
-        pbuf_free(p);
-        return ERR_IF;
+    /* Wait for any previous TX to finish (typically < 100 us) */
+    uint32_t t = HAL_GetTick();
+    while (HAL_ETH_GetState(&heth) != HAL_ETH_STATE_STARTED) {
+        if (HAL_GetTick() - t > 50u) return ERR_IF;
     }
-    return ERR_OK;
+
+    return (HAL_ETH_Transmit_IT(&heth, &TxConfig) == HAL_OK) ? ERR_OK : ERR_IF;
 }
 
 /* ---- Receive ------------------------------------------------------------ */
@@ -212,10 +250,19 @@ void HAL_ETH_MspInit(ETH_HandleTypeDef *ethHandle)
     (void)ethHandle;
     GPIO_InitTypeDef gi = {0};
 
+    /* Enable peripheral clocks FIRST so the reset propagates with the
+     * clock running -- required after warm resets where the MAC/DMA may
+     * retain stale state from a previous session. */
     __HAL_RCC_ETH_CLK_ENABLE();
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_GPIOC_CLK_ENABLE();
+
+    /* Force hardware reset of the Ethernet MAC/DMA peripheral. */
+    __HAL_RCC_ETHMAC_FORCE_RESET();
+    for (volatile int i = 0; i < 100; i++) {}  /* brief settling delay */
+    __HAL_RCC_ETHMAC_RELEASE_RESET();
+    for (volatile int i = 0; i < 100; i++) {}  /* brief settling delay */
 
     /* RMII pins:
      * PA1  = ETH_REF_CLK, PA2 = ETH_MDIO, PA7 = ETH_CRS_DV
