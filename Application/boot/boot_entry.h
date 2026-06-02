@@ -16,7 +16,7 @@ extern "C" {
  * Decide whether the bootloader should remain active.
  *
  * Returns true (stay in bootloader) when at least one of:
- *   1. Service button pressed at startup
+ *   1. Software request from the application (magic in no-init RAM)
  *   2. Application image absent or invalid
  *   3. Metadata flag: enter-bootloader requested
  *   4. Install was interrupted and needs completion
@@ -25,8 +25,9 @@ extern "C" {
  */
 bool boot_entry_should_stay(const metadata_t *meta);
 
-/** Check if the physical service button is pressed (active-low on PC8). */
-bool boot_entry_button_pressed(void);
+/** Check (and consume) the application's software request to stay in the
+ *  bootloader. The request is a magic word in a no-init RAM cell. */
+bool boot_entry_software_request(void);
 
 #ifdef __cplusplus
 }

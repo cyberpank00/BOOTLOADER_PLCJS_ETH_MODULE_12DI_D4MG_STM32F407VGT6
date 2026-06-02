@@ -250,10 +250,19 @@ void HAL_ETH_MspInit(ETH_HandleTypeDef *ethHandle)
     (void)ethHandle;
     GPIO_InitTypeDef gi = {0};
 
+    /* Enable peripheral clocks FIRST so the reset propagates with the
+     * clock running -- required after warm resets where the MAC/DMA may
+     * retain stale state from a previous session. */
     __HAL_RCC_ETH_CLK_ENABLE();
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_GPIOC_CLK_ENABLE();
+
+    /* Force hardware reset of the Ethernet MAC/DMA peripheral. */
+    __HAL_RCC_ETHMAC_FORCE_RESET();
+    for (volatile int i = 0; i < 100; i++) {}  /* brief settling delay */
+    __HAL_RCC_ETHMAC_RELEASE_RESET();
+    for (volatile int i = 0; i < 100; i++) {}  /* brief settling delay */
 
     /* RMII pins:
      * PA1  = ETH_REF_CLK, PA2 = ETH_MDIO, PA7 = ETH_CRS_DV
