@@ -161,24 +161,32 @@ Bootloader остается активным, если выполняется х
 - `10` - `BLOCK_INDEX`
 - `11` - `BAD_PARAMS`
 
-## Python OTA-клиент
+## OTA-клиент
 
-Опорный клиент: `tools/fw_update.py`.
+Опорный CLI-клиент: `tools/fw_update.mjs`. Легаси-версия на Python всё ещё
+доступна как `tools/fw_update.py`.
 
 Базовое использование:
 
 ```bash
-python tools/fw_update.py status
-python tools/fw_update.py update path/to/app.bin
-python tools/fw_update.py abort
-python tools/fw_update.py reboot
+node tools/fw_update.mjs status
+node tools/fw_update.mjs update path/to/app.bin
+node tools/fw_update.mjs abort
+node tools/fw_update.mjs reboot
+node tools/fw_update.mjs app-bootloader
 ```
 
 Параметры по умолчанию:
 
-- target IP: `192.168.142.99`
-- port: `502`
+- IP bootloader: `192.168.142.99`
+- IP приложения: `192.168.142.98`
+- порт: `502`
 - unit id: `1`
+
+Полезные опции:
+
+- `--boot-ip` / `--ip` — переопределить адрес bootloader
+- `--app-ip` — переопределить адрес приложения
 
 ## Вход в bootloader из основного приложения
 
