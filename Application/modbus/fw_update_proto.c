@@ -7,6 +7,7 @@
 #include "flash_map.h"
 #include "flash_if.h"
 #include "crc32.h"
+#include "app_validate.h"
 #include "boot_state.h"
 #include <string.h>
 
@@ -184,6 +185,16 @@ static void exec_finalize(void)
                                s_meta->image_size);
     if (crc != s_meta->image_crc32) {
         s_meta->last_error = BOOT_ERR_IMAGE_CRC;
+        s_cmd_status = CMD_STATUS_ERROR;
+        return;
+    }
+
+    /* Validate firmware header embedded in the staging binary.
+     * This ensures the binary itself carries the correct product identity,
+     * independent of what the updater tool claimed in BEGIN_UPDATE. */
+    if (!app_validate_header(STAGING_FLASH_BASE, PRODUCT_ID_DEFAULT,
+                             (uint16_t)HW_REVISION_DEFAULT)) {
+        s_meta->last_error = BOOT_ERR_PRODUCT_MISMATCH;
         s_cmd_status = CMD_STATUS_ERROR;
         return;
     }

@@ -43,6 +43,17 @@ bool app_validate_full(uint32_t app_base, uint32_t expected_size,
 /** Read the firmware header from the given base address. */
 bool app_read_header(uint32_t app_base, fw_header_t *hdr);
 
+/**
+ * Check that the firmware header embedded in the image at @p app_base
+ * carries the expected product identity.
+ *
+ * Returns true  when magic, product_id, and hw_revision all match.
+ * Returns false when the magic is wrong (no header) or any field mismatches.
+ */
+bool app_validate_header(uint32_t app_base,
+                         uint32_t expected_product_id,
+                         uint16_t expected_hw_rev);
+
 #ifdef __cplusplus
 }
 #endif

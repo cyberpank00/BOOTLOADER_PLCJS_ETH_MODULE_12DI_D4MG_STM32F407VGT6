@@ -18,12 +18,20 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 add_executable(${CMAKE_PROJECT_NAME})
 
+# ---------- Module identity (overridable per module variant) ---------------
+# Pass -DPRODUCT_ID=0x... and/or -DHW_REVISION=N on the cmake command line to
+# build a bootloader for a specific hardware variant.  Defaults match 12DI/D4MG.
+set(PRODUCT_ID   "0x12D1D4A0" CACHE STRING "Product ID for this module variant")
+set(HW_REVISION  "1"          CACHE STRING "Hardware revision number")
+
 # ---------- Compile definitions ------------------------------------------
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     USE_HAL_DRIVER
     STM32F407xx
     NMBS_CLIENT_DISABLED=1
     $<$<CONFIG:Debug>:DEBUG>
+    PRODUCT_ID_DEFAULT=${PRODUCT_ID}u
+    HW_REVISION_DEFAULT=${HW_REVISION}u
 )
 
 # ---------- Include paths ------------------------------------------------
