@@ -160,24 +160,32 @@ Known error codes:
 - `10` - `BLOCK_INDEX`
 - `11` - `BAD_PARAMS`
 
-## Python OTA client
+## OTA client
 
-The reference client is `tools/fw_update.py`.
+The reference CLI client is `tools/fw_update.mjs`. The legacy Python version is
+still available as `tools/fw_update.py`.
 
 Basic usage:
 
 ```bash
-python tools/fw_update.py status
-python tools/fw_update.py update path/to/app.bin
-python tools/fw_update.py abort
-python tools/fw_update.py reboot
+node tools/fw_update.mjs status
+node tools/fw_update.mjs update path/to/app.bin
+node tools/fw_update.mjs abort
+node tools/fw_update.mjs reboot
+node tools/fw_update.mjs app-bootloader
 ```
 
 Default client parameters:
 
-- target IP: `192.168.142.99`
+- bootloader IP: `192.168.142.99`
+- application IP: `192.168.142.98`
 - port: `502`
 - unit id: `1`
+
+Useful options:
+
+- `--boot-ip` / `--ip` - override bootloader target
+- `--app-ip` - override application target
 
 ## Entering bootloader from the main application
 
