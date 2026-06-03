@@ -19,10 +19,13 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 add_executable(${CMAKE_PROJECT_NAME})
 
 # ---------- Module identity (overridable per module variant) ---------------
-# Pass -DPRODUCT_ID=0x... and/or -DHW_REVISION=N on the cmake command line to
-# build a bootloader for a specific hardware variant.  Defaults match 12DI/D4MG.
+# Pass -DPRODUCT_ID=0x... and/or -DHW_REVISION=0xMMmm on the cmake command line
+# to build a bootloader for a specific hardware variant.
+#
+# HW_REVISION encoding: (major << 8) | minor  →  e.g. hw:01.02 = 0x0102
+# OTA validation: product_id exact match + hw_revision major byte match.
 set(PRODUCT_ID   "0x12D1D4A0" CACHE STRING "Product ID for this module variant")
-set(HW_REVISION  "1"          CACHE STRING "Hardware revision number")
+set(HW_REVISION  "0x0101"     CACHE STRING "HW revision (major<<8|minor), e.g. hw:01.01 = 0x0101")
 
 # ---------- Compile definitions ------------------------------------------
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE

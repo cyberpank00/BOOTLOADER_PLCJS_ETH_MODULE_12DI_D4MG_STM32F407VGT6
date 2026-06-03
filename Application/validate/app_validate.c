@@ -60,7 +60,9 @@ bool app_validate_header(uint32_t app_base,
     if (hdr.product_id != expected_product_id) {
         return false;
     }
-    if (hdr.hw_revision != expected_hw_rev) {
+    /* Compare major byte only: (revision >> 8).
+     * Minor byte (non-pinout HW changes) does not break FW compatibility. */
+    if ((hdr.hw_revision >> 8u) != (expected_hw_rev >> 8u)) {
         return false;
     }
     return true;
